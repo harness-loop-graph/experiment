@@ -19,6 +19,7 @@ import {
   RegistryToolManager,
   registerBuiltinTools,
   RecordingVerificationManager,
+  DEFAULT_ALLOWED_COMMAND_PREFIXES,
 } from '../../glm/dist/index.js';
 
 const DEFAULT_TASK =
@@ -183,7 +184,7 @@ function buildHarness(ws, model, toolRounds, auditFile) {
     {
       workspaceRoot: ws,
       allowedTools: ['write_file', 'read_file', 'run_command'],
-      allowedCommandPrefixes: ['npm', 'node', 'npx', 'git', 'ls', 'cat', 'echo', 'mkdir', 'test', 'docker', 'pnpm', 'psql'],
+      allowedCommandPrefixes: DEFAULT_ALLOWED_COMMAND_PREFIXES,
       maxFileBytes: 10 * 1024 * 1024,
     },
     auditFile,
