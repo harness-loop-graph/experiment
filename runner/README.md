@@ -23,6 +23,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 | `--with-batteries` | off | After generation, start the stack and run acceptance batteries |
 | `--keep` | off | With `--with-batteries`, do **not** tear the stack down |
 | `--dry-run` | off | Print the plan JSON and exit without calling the model |
+| `--harness-config <path>` | — | JSON `{ mcpServers, skillsDirs }`; wires MCP tools + skills into every harness the run builds |
 
 ### Credentials
 
@@ -48,6 +49,28 @@ Router:
 - Non-reviewer nodes flow linearly: architect → data → backend → frontend → reviewer.
 - A failed node is retried once (same node), then the graph fails.
 - After reviewer: `acceptable: true` → FINISH; `responsible: X` → NEXT X; otherwise retry reviewer once, then FAIL.
+
+## MCP tools and skills (`--harness-config`)
+
+A JSON config (see `glm/examples/harness-config.json`) can add MCP tools
+and agent skills identically to C1, C2 and C3:
+
+```json
+{
+  "mcpServers": { "name": { "command": "...", "args": [], "env": {}, "cwd": "." } },
+  "skillsDirs": ["./skills"]
+}
+```
+
+The runner loads it once per run: one MCP connection (`McpToolProvider`)
+is opened and shared across every harness the run builds (C3 builds one
+per graph node), and one `SkillCatalog` is loaded once. Each harness's
+tool manager gets the same MCP tools plus `load_skill` registered into it,
+and the guardrail `allowedTools` list is extended with those tool names —
+so guardrails and the audit log apply to MCP/skill calls exactly like the
+built-in tools. The connection is always closed at the end of the run
+(`finally`), even on failure. Without `--harness-config`, none of this
+runs and output is unchanged.
 
 ## Battery phase (`--with-batteries`)
 
@@ -77,7 +100,14 @@ Every run writes `run-report.json` into the workspace:
   "totalLoopTurns?": 0,
   "decision?": {},
   "failure?": "...",
-  "trace": [...]
+  "trace": [...],
+  "harnessConfig?": {
+    "path": "...",
+    "sha256": "...",
+    "mcpServers": ["..."],
+    "toolNames": ["mcp__server__tool", "load_skill"],
+    "skillNames": ["..."]
+  }
 }
 ```
 
@@ -85,3 +115,6 @@ Every run writes `run-report.json` into the workspace:
 - `steps` — graph steps (C3 only).
 - `totalLoopTurns` — total loop turns across all nodes (C3 only).
 - `trace` — compact per-turn/per-step summaries; no full model content.
+- `harnessConfig` — only present with `--harness-config`: the config path,
+  a sha256 of its content, the configured MCP server names, every
+  registered tool name (MCP + `load_skill`), and every loaded skill name.

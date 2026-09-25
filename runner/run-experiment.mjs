@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -20,6 +20,11 @@ import {
   registerBuiltinTools,
   RecordingVerificationManager,
   DEFAULT_ALLOWED_COMMAND_PREFIXES,
+  DEFAULT_ALLOWED_TOOLS,
+  loadHarnessConfig,
+  McpToolProvider,
+  SkillCatalog,
+  registerSkillTool,
 } from '../../glm/dist/index.js';
 
 const DEFAULT_TASK =
@@ -43,6 +48,7 @@ function parseArgs(argv) {
     withBatteries: false,
     keep: false,
     dryRun: false,
+    harnessConfig: null,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -57,6 +63,7 @@ function parseArgs(argv) {
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
     else if (a === '--dry-run') parsed.dryRun = true;
+    else if (a === '--harness-config') parsed.harnessConfig = path.resolve(args[++i]);
   }
   if (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config)) {
     console.error('Usage: node run-experiment.mjs --config c1|c2|c3 [options]');
@@ -178,12 +185,50 @@ async function runBatteries(ws, keep) {
   return { batteryReport, batteryError };
 }
 
-function buildHarness(ws, model, toolRounds, auditFile) {
+/**
+ * Loads a --harness-config once per run: connects MCP (one connection,
+ * shared across every harness the run builds) and loads the skill catalog.
+ * Returns null when no config was requested, so callers stay unchanged.
+ */
+async function loadHarnessExtras(configPath) {
+  if (!configPath) return null;
+  const raw = await fs.readFile(configPath, 'utf-8');
+  const sha256 = createHash('sha256').update(raw).digest('hex');
+  const config = await loadHarnessConfig(configPath);
+
+  const mcpProvider = new McpToolProvider({ mcpServers: config.mcpServers });
+  const mcpSpecs = await mcpProvider.connect();
+
+  let skillCatalog;
+  if (config.skillsDirs.length > 0) {
+    const catalog = await SkillCatalog.load(config.skillsDirs);
+    if (catalog.list().length > 0) skillCatalog = catalog;
+  }
+
+  const allowedToolNames = mcpSpecs.map((s) => s.name);
+  if (skillCatalog) allowedToolNames.push('load_skill');
+
+  return {
+    mcpProvider,
+    skillCatalog,
+    allowedToolNames,
+    metadata: {
+      path: configPath,
+      sha256,
+      mcpServers: Object.keys(config.mcpServers),
+      toolNames: allowedToolNames,
+      skillNames: skillCatalog ? skillCatalog.list().map((s) => s.name) : [],
+    },
+    close: () => mcpProvider.close(),
+  };
+}
+
+function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
   const execution = new LocalExecutionManager({ workspaceRoot: ws, timeoutMs: 600_000 });
   const guardrails = new PolicyGuardrails(
     {
       workspaceRoot: ws,
-      allowedTools: ['write_file', 'read_file', 'run_command'],
+      allowedTools: [...DEFAULT_ALLOWED_TOOLS, ...(harnessExtras?.allowedToolNames ?? [])],
       allowedCommandPrefixes: DEFAULT_ALLOWED_COMMAND_PREFIXES,
       maxFileBytes: 10 * 1024 * 1024,
     },
@@ -191,9 +236,15 @@ function buildHarness(ws, model, toolRounds, auditFile) {
   );
   const tools = new RegistryToolManager(guardrails);
   const availTools = registerBuiltinTools(tools, { execution, workspaceRoot: ws });
+  if (harnessExtras) {
+    availTools.push(...harnessExtras.mcpProvider.registerInto(tools));
+    if (harnessExtras.skillCatalog) {
+      availTools.push(registerSkillTool(tools, harnessExtras.skillCatalog));
+    }
+  }
   const verification = new RecordingVerificationManager();
   const harness = new Harness(
-    { context: new FsContextManager(), model, tools, execution, verification, guardrails },
+    { context: new FsContextManager(harnessExtras?.skillCatalog), model, tools, execution, verification, guardrails },
     {
       workspaceRoot: ws,
       availTools,
@@ -360,6 +411,7 @@ async function main() {
         toolRoundsPerTurn: parsed.toolRounds,
       },
       batteryPhase: parsed.withBatteries,
+      harnessConfig: parsed.harnessConfig ?? undefined,
     };
     if (parsed.config === 'c3') {
       plan.nodes = buildNodes(parsed).map((n) => ({
@@ -392,70 +444,76 @@ async function main() {
     turns: 0,
   };
 
-  if (parsed.config === 'c1') {
-    const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
-    const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'));
-    const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
-    report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
-    report.usage = model.getUsage();
-    report.turns = result.turns.length;
-    report.trace = compactTraceC1(result);
-    if (result.finalResponse.type === 'finish') {
-      report.finalResponse = truncate(result.finalResponse.content, 2000);
-    } else if (result.finalResponse.type === 'error') {
-      report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
-    }
-  } else if (parsed.config === 'c2') {
-    const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
-    const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'));
-    const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
-    const loopResult = await loop.run({
-      task,
-      maxTurns: parsed.maxTurns,
-      verification: { command: parsed.verifyCmd },
-      toolRoundsPerTurn: parsed.toolRounds,
-    });
-    report.status = loopResult.status;
-    report.usage = model.getUsage();
-    report.turns = loopResult.turns;
-    report.decision = loopResult.decision;
-    report.failure = loopResult.failure;
-    report.trace = compactTraceC2(loopResult);
-    if (loopResult.finalResponse?.type === 'finish') {
-      report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
-    }
-  } else if (parsed.config === 'c3') {
-    const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
-    const factory = (node) => {
-      const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`));
-      return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
-    };
-    const nodes = buildNodes(parsed);
-    const engine = new GraphEngine(factory, {
-      task: 'Implement the complete system described in SPEC.md',
-      initialNode: 'architect',
-      nodes,
-      edges: [],
-      maxSteps: parsed.maxSteps,
-    }, buildRouter(ws));
-    const graphResult = await engine.run();
-    report.status = graphResult.status;
-    report.usage = model.getUsage();
-    report.steps = graphResult.steps;
-    report.totalLoopTurns = graphResult.totalLoopTurns;
-    report.decision = graphResult.decision;
-    report.failure = graphResult.failure;
-    report.trace = compactTraceC3(graphResult);
-  }
+  const harnessExtras = await loadHarnessExtras(parsed.harnessConfig);
+  if (harnessExtras) report.harnessConfig = harnessExtras.metadata;
 
-  let batteryInfo = null;
-  if (parsed.withBatteries) {
-    batteryInfo = await runBatteries(ws, parsed.keep);
-    report.batteryPhase = {
-      ran: true,
-      passed: !batteryInfo.batteryError && (batteryInfo.batteryReport?.passed ?? false),
-      error: batteryInfo.batteryError || undefined,
-    };
+  try {
+    if (parsed.config === 'c1') {
+      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
+      const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
+      report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
+      report.usage = model.getUsage();
+      report.turns = result.turns.length;
+      report.trace = compactTraceC1(result);
+      if (result.finalResponse.type === 'finish') {
+        report.finalResponse = truncate(result.finalResponse.content, 2000);
+      } else if (result.finalResponse.type === 'error') {
+        report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
+      }
+    } else if (parsed.config === 'c2') {
+      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
+      const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+      const loopResult = await loop.run({
+        task,
+        maxTurns: parsed.maxTurns,
+        verification: { command: parsed.verifyCmd },
+        toolRoundsPerTurn: parsed.toolRounds,
+      });
+      report.status = loopResult.status;
+      report.usage = model.getUsage();
+      report.turns = loopResult.turns;
+      report.decision = loopResult.decision;
+      report.failure = loopResult.failure;
+      report.trace = compactTraceC2(loopResult);
+      if (loopResult.finalResponse?.type === 'finish') {
+        report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
+      }
+    } else if (parsed.config === 'c3') {
+      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const factory = (node) => {
+        const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
+        return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
+      };
+      const nodes = buildNodes(parsed);
+      const engine = new GraphEngine(factory, {
+        task: 'Implement the complete system described in SPEC.md',
+        initialNode: 'architect',
+        nodes,
+        edges: [],
+        maxSteps: parsed.maxSteps,
+      }, buildRouter(ws));
+      const graphResult = await engine.run();
+      report.status = graphResult.status;
+      report.usage = model.getUsage();
+      report.steps = graphResult.steps;
+      report.totalLoopTurns = graphResult.totalLoopTurns;
+      report.decision = graphResult.decision;
+      report.failure = graphResult.failure;
+      report.trace = compactTraceC3(graphResult);
+    }
+
+    if (parsed.withBatteries) {
+      const batteryInfo = await runBatteries(ws, parsed.keep);
+      report.batteryPhase = {
+        ran: true,
+        passed: !batteryInfo.batteryError && (batteryInfo.batteryReport?.passed ?? false),
+        error: batteryInfo.batteryError || undefined,
+      };
+    }
+  } finally {
+    if (harnessExtras) await harnessExtras.close();
   }
 
   const finishedAt = new Date().toISOString();
