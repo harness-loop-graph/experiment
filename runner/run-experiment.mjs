@@ -21,7 +21,7 @@ import {
   RecordingVerificationManager,
   DEFAULT_ALLOWED_COMMAND_PREFIXES,
   DEFAULT_ALLOWED_TOOLS,
-  loadHarnessConfig,
+  parseHarnessConfig,
   McpToolProvider,
   SkillCatalog,
   registerSkillTool,
@@ -63,7 +63,14 @@ function parseArgs(argv) {
     else if (a === '--with-batteries') parsed.withBatteries = true;
     else if (a === '--keep') parsed.keep = true;
     else if (a === '--dry-run') parsed.dryRun = true;
-    else if (a === '--harness-config') parsed.harnessConfig = path.resolve(args[++i]);
+    else if (a === '--harness-config') {
+      const value = args[++i];
+      if (value === undefined) {
+        console.error('Usage: --harness-config <path> requires a value');
+        process.exit(1);
+      }
+      parsed.harnessConfig = path.resolve(value);
+    }
   }
   if (!parsed.config || !['c1', 'c2', 'c3'].includes(parsed.config)) {
     console.error('Usage: node run-experiment.mjs --config c1|c2|c3 [options]');
@@ -189,20 +196,29 @@ async function runBatteries(ws, keep) {
  * Loads a --harness-config once per run: connects MCP (one connection,
  * shared across every harness the run builds) and loads the skill catalog.
  * Returns null when no config was requested, so callers stay unchanged.
+ * Reads the config file once and reuses that same buffer for both hashing
+ * and parsing (`parseHarnessConfig`), instead of reading it twice.
  */
 async function loadHarnessExtras(configPath) {
   if (!configPath) return null;
   const raw = await fs.readFile(configPath, 'utf-8');
   const sha256 = createHash('sha256').update(raw).digest('hex');
-  const config = await loadHarnessConfig(configPath);
+  const config = parseHarnessConfig(raw, path.dirname(configPath), configPath);
 
   const mcpProvider = new McpToolProvider({ mcpServers: config.mcpServers });
   const mcpSpecs = await mcpProvider.connect();
 
   let skillCatalog;
-  if (config.skillsDirs.length > 0) {
-    const catalog = await SkillCatalog.load(config.skillsDirs);
-    if (catalog.list().length > 0) skillCatalog = catalog;
+  try {
+    if (config.skillsDirs.length > 0) {
+      const catalog = await SkillCatalog.load(config.skillsDirs);
+      if (catalog.list().length > 0) skillCatalog = catalog;
+    }
+  } catch (err) {
+    // connect() already succeeded: close it before propagating, or the MCP
+    // server process(es) leak for the rest of the run.
+    await mcpProvider.close();
+    throw err;
   }
 
   const allowedToolNames = mcpSpecs.map((s) => s.name);
@@ -254,7 +270,10 @@ function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
       maxToolRounds: toolRounds,
     },
   );
-  return { harness, execution, verification };
+  // `tools`/`guardrails`/`availTools` are exposed alongside `harness` so
+  // tests can inspect the wiring (registered tool names, allowlist) without
+  // driving a full model run.
+  return { harness, execution, verification, tools, guardrails, availTools };
 }
 
 function buildRouter(ws) {
@@ -444,10 +463,21 @@ async function main() {
     turns: 0,
   };
 
-  const harnessExtras = await loadHarnessExtras(parsed.harnessConfig);
-  if (harnessExtras) report.harnessConfig = harnessExtras.metadata;
-
+  let harnessExtras = null;
+  let configFailure = null;
   try {
+    harnessExtras = await loadHarnessExtras(parsed.harnessConfig);
+    if (harnessExtras) report.harnessConfig = harnessExtras.metadata;
+  } catch (err) {
+    // A bad --harness-config (unreadable/invalid file, a server that fails
+    // to connect, a skills-dir failure) is recorded like any other failure
+    // instead of crashing before run-report.json is written.
+    configFailure = err instanceof Error ? err.message : String(err);
+    report.status = 'FAILED';
+    report.failure = `harness-config: ${configFailure}`;
+  }
+
+  if (!configFailure) try {
     if (parsed.config === 'c1') {
       const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
@@ -513,7 +543,18 @@ async function main() {
       };
     }
   } finally {
-    if (harnessExtras) await harnessExtras.close();
+    if (harnessExtras) {
+      try {
+        await harnessExtras.close();
+      } catch (closeErr) {
+        // Never let a close() failure mask the original run/battery error
+        // (or overwrite a normal `report.failure`): log it and record it
+        // under its own field instead of rethrowing from a finally block.
+        const msg = `Failed to close harness extras: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`;
+        console.error(msg);
+        report.closeError = msg;
+      }
+    }
   }
 
   const finishedAt = new Date().toISOString();
@@ -538,9 +579,25 @@ async function main() {
     console.error(`  Batteries:  ${bp.passed ? 'passed' : bp.error ? `failed (${bp.error})` : 'failed'}`);
   }
   console.log(reportPath);
+
+  if (configFailure) process.exitCode = 1;
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const isEntryPoint = process.argv[1] && import.meta.url === `file://${path.resolve(process.argv[1])}`;
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+export {
+  parseArgs,
+  loadCredentials,
+  loadHarnessExtras,
+  buildHarness,
+  buildNodes,
+  buildRouter,
+  createWorkspace,
+  main,
+};

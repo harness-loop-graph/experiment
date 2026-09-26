@@ -29,6 +29,10 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 
 `MODEL_API_KEY` and `MODEL_ID` are read from `process.env`, falling back to `glm/.env` (simple `key=value` parse). A clear error is raised if both are missing.
 
+### Tests
+
+`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against glm's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
+
 ## Configurations
 
 - **c1** — Single `Harness.run(task)` interaction. No verification, no retry. Fastest, weakest.
@@ -69,8 +73,17 @@ tool manager gets the same MCP tools plus `load_skill` registered into it,
 and the guardrail `allowedTools` list is extended with those tool names —
 so guardrails and the audit log apply to MCP/skill calls exactly like the
 built-in tools. The connection is always closed at the end of the run
-(`finally`), even on failure. Without `--harness-config`, none of this
-runs and output is unchanged.
+(`finally`), even on failure; a failure while closing it is logged and
+recorded under `run-report.json`'s `closeError` field without replacing
+the run's own failure. Without `--harness-config`, none of this runs and
+output is unchanged.
+
+A missing/invalid config file, a server that fails to connect, or a
+skills directory that fails to load are recorded like any other run
+failure: `run-report.json` is still written, with `status: "FAILED"` and
+`failure: "harness-config: <message>"`, and the process exits non-zero.
+`--harness-config` with no path value is a usage error (matching
+`--config`), not a raw stack trace.
 
 ## Battery phase (`--with-batteries`)
 
@@ -107,7 +120,8 @@ Every run writes `run-report.json` into the workspace:
     "mcpServers": ["..."],
     "toolNames": ["mcp__server__tool", "load_skill"],
     "skillNames": ["..."]
-  }
+  },
+  "closeError?": "..."
 }
 ```
 
@@ -118,3 +132,7 @@ Every run writes `run-report.json` into the workspace:
 - `harnessConfig` — only present with `--harness-config`: the config path,
   a sha256 of its content, the configured MCP server names, every
   registered tool name (MCP + `load_skill`), and every loaded skill name.
+  A failure loading/connecting it is recorded as `status: "FAILED"` and
+  `failure: "harness-config: ..."` instead (see above).
+- `closeError` — only present if closing the MCP connection at the end of
+  the run itself failed; never replaces `failure`.
