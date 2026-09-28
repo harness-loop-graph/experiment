@@ -8,7 +8,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../glm/dist/index.js';
-import { loadHarnessExtras, buildHarness, createModel, summarizeRouting } from './run-experiment.mjs';
+import { loadHarnessExtras, buildHarness, createModel, summarizeRouting, attachUsageAndRouting } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'glm', 'tests');
@@ -128,13 +128,18 @@ test('createModel() wraps the default adapter in a RoutingModelAdapter with the 
     created.push(cfg);
     return { async complete() { return { type: 'finish', content: 'stub' }; } };
   };
-  process.env.LONG_KEY = 'long-key';
-  // The 'retry' route has no apiKeyEnv, so it falls back to MODEL_API_KEY.
+  const previousLongKey = process.env.LONG_KEY;
   const previousModelApiKey = process.env.MODEL_API_KEY;
-  process.env.MODEL_API_KEY = 'default-key';
+  process.env.LONG_KEY = 'long-key';
+  // The 'retry' route has no apiKeyEnv, so it must fall back to
+  // MODEL_API_KEY. Use a distinct value from the `apiKey` passed to
+  // createModel() below (a different, unrelated 'run-default-key') so the
+  // assertion can actually tell the fallback came from MODEL_API_KEY and
+  // not from the createModel() call's own apiKey argument.
+  process.env.MODEL_API_KEY = 'env-fallback-key';
   try {
     const model = await createModel({
-      apiKey: 'default-key',
+      apiKey: 'run-default-key',
       modelId: 'default-model',
       sessionId: 'sess-1',
       harnessExtras: {
@@ -153,10 +158,11 @@ test('createModel() wraps the default adapter in a RoutingModelAdapter with the 
     assert.equal(typeof model.getRouting, 'function');
     assert.deepEqual(created, [
       { apiKey: 'long-key', model: 'long-model', baseUrl: undefined, sessionId: 'sess-1' },
-      { apiKey: 'default-key', model: 'retry-model', baseUrl: undefined, sessionId: 'sess-1' },
+      { apiKey: 'env-fallback-key', model: 'retry-model', baseUrl: undefined, sessionId: 'sess-1' },
     ]);
   } finally {
-    delete process.env.LONG_KEY;
+    if (previousLongKey === undefined) delete process.env.LONG_KEY;
+    else process.env.LONG_KEY = previousLongKey;
     if (previousModelApiKey === undefined) delete process.env.MODEL_API_KEY;
     else process.env.MODEL_API_KEY = previousModelApiKey;
   }
@@ -175,6 +181,76 @@ test('createModel() propagates a clear error naming the route and env var when a
       }),
     /route 'longContext' needs env var 'MISSING_KEY'/,
   );
+});
+
+test('attachUsageAndRouting() sets report.routing from a router model (shared by c1/c2/c3)', async () => {
+  const created = [];
+  const makeAdapter = (cfg) => {
+    created.push(cfg);
+    return { async complete() { return { type: 'finish', content: 'stub' }; } };
+  };
+  const previousModelApiKey = process.env.MODEL_API_KEY;
+  process.env.MODEL_API_KEY = 'default-key';
+  try {
+    const model = await createModel({
+      apiKey: 'default-key',
+      modelId: 'default-model',
+      sessionId: 'sess-1',
+      harnessExtras: { router: { routes: { retry: { model: 'retry-model' } } } },
+      makeAdapter,
+    });
+    await model.complete({ task: 't', context: { projectRoot: '/tmp', files: [] }, availTools: [], feedback: 'retry this' });
+
+    // c1, c2 and c3 each call attachUsageAndRouting() with their run's
+    // model right after computing report.status; this is that one call
+    // site, exercised directly instead of running a full harness/loop/graph.
+    const report = { status: 'SUCCESS' };
+    attachUsageAndRouting(report, model);
+
+    assert.equal(typeof report.usage, 'object');
+    assert.deepEqual(report.routing, { byRoute: report.routing.byRoute, decisions: { 'retry:retry': 1 } });
+    assert.ok('retry' in report.routing.byRoute);
+  } finally {
+    if (previousModelApiKey === undefined) delete process.env.MODEL_API_KEY;
+    else process.env.MODEL_API_KEY = previousModelApiKey;
+  }
+});
+
+test('attachUsageAndRouting() leaves report.routing unset for a plain (non-router) model', async () => {
+  const model = await createModel({ apiKey: 'k', modelId: 'm', sessionId: 's', harnessExtras: null });
+  // A plain GlmModelAdapter never made a real call, so getUsage() just
+  // needs to exist and be callable; the point here is the absent `routing`.
+  const report = { status: 'SUCCESS' };
+  attachUsageAndRouting(report, model);
+
+  assert.equal(typeof report.usage, 'object');
+  assert.equal('routing' in report, false);
+});
+
+test('loadHarnessExtras() adds routeNames metadata (["default", ...routes]) only when a router is configured', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-routenames-'));
+  let extrasWithRouter;
+  let extrasWithoutRouter;
+  try {
+    const withRouterConfig = path.join(workspace, 'with-router.json');
+    await fs.writeFile(
+      withRouterConfig,
+      JSON.stringify({
+        mcpServers: { fixture: { command: 'node', args: [FIXTURE_MCP_SERVER] } },
+        router: { routes: { longContext: { model: 'big-model' }, retry: { model: 'retry-model' } } },
+      }),
+    );
+    extrasWithRouter = await loadHarnessExtras(withRouterConfig);
+    assert.deepEqual(extrasWithRouter.metadata.routeNames, ['default', 'longContext', 'retry']);
+
+    const withoutRouterConfig = await writeHarnessConfigFile(workspace, { skillsDirs: [] });
+    extrasWithoutRouter = await loadHarnessExtras(withoutRouterConfig);
+    assert.equal('routeNames' in extrasWithoutRouter.metadata, false);
+  } finally {
+    await extrasWithRouter?.close();
+    await extrasWithoutRouter?.close();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test('summarizeRouting() collapses the decision log into counts per route/reason, keeping byRoute as-is', () => {

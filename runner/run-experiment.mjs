@@ -271,6 +271,20 @@ function summarizeRouting(routing) {
   return { byRoute: routing.byRoute, decisions: decisionCounts };
 }
 
+/**
+ * Sets `report.usage` from the model, and `report.routing` when (and only
+ * when) `model` is a router (i.e. exposes `getRouting()`). The single call
+ * site c1/c2/c3 all share, so a router config produces the same
+ * `run-report.json` shape regardless of which of the three ran, and a
+ * plain (non-router) model never gets a `routing` field.
+ */
+function attachUsageAndRouting(report, model) {
+  report.usage = model.getUsage();
+  if (typeof model.getRouting === 'function') {
+    report.routing = summarizeRouting(model.getRouting());
+  }
+}
+
 function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
   const execution = new LocalExecutionManager({ workspaceRoot: ws, timeoutMs: 600_000 });
   const guardrails = new PolicyGuardrails(
@@ -515,8 +529,7 @@ async function main() {
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
-      report.usage = model.getUsage();
-      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
+      attachUsageAndRouting(report, model);
       report.turns = result.turns.length;
       report.trace = compactTraceC1(result);
       if (result.finalResponse.type === 'finish') {
@@ -535,8 +548,7 @@ async function main() {
         toolRoundsPerTurn: parsed.toolRounds,
       });
       report.status = loopResult.status;
-      report.usage = model.getUsage();
-      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
+      attachUsageAndRouting(report, model);
       report.turns = loopResult.turns;
       report.decision = loopResult.decision;
       report.failure = loopResult.failure;
@@ -560,8 +572,7 @@ async function main() {
       }, buildRouter(ws));
       const graphResult = await engine.run();
       report.status = graphResult.status;
-      report.usage = model.getUsage();
-      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
+      attachUsageAndRouting(report, model);
       report.steps = graphResult.steps;
       report.totalLoopTurns = graphResult.totalLoopTurns;
       report.decision = graphResult.decision;
@@ -637,5 +648,6 @@ export {
   createWorkspace,
   createModel,
   summarizeRouting,
+  attachUsageAndRouting,
   main,
 };
