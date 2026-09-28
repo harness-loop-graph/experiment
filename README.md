@@ -18,6 +18,8 @@ that workspace.
   Docker Compose).
 - `acceptance/` — hidden batteries (gitignored; never part of what the
   generator sees).
+- `skills/` + `harness-config.json` — skills given to the harness in every
+  configuration (see `skills/README.md`).
 - `runner/` — experiment runner: runs C1/C2/C3 in isolated workspaces
   and records metrics (see `runner/README.md`).
 
