@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID, createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -583,7 +583,8 @@ async function main() {
   if (configFailure) process.exitCode = 1;
 }
 
-const isEntryPoint = process.argv[1] && import.meta.url === `file://${path.resolve(process.argv[1])}`;
+// Node realpath-resolves the main module; argv[1] is not, and import.meta.url is percent-encoded.
+const isEntryPoint = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (isEntryPoint) {
   main().catch((err) => {
     console.error(err);

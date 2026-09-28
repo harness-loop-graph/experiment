@@ -114,3 +114,17 @@ test('loadHarnessExtras() closes the MCP provider when the skills load fails', a
     await fs.rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('runs main() when invoked through a symlinked path', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-entry-'));
+  try {
+    const link = path.join(dir, 'run experiment.mjs');
+    await fs.symlink(path.join(__dirname, 'run-experiment.mjs'), link);
+    const res = spawnSync(process.execPath, [link], { encoding: 'utf8' });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /Usage: node run-experiment\.mjs/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
