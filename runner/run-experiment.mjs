@@ -25,6 +25,7 @@ import {
   McpToolProvider,
   SkillCatalog,
   registerSkillTool,
+  createRoutedModel,
 } from '../../glm/dist/index.js';
 
 const DEFAULT_TASK =
@@ -228,15 +229,46 @@ async function loadHarnessExtras(configPath) {
     mcpProvider,
     skillCatalog,
     allowedToolNames,
+    router: config.router,
     metadata: {
       path: configPath,
       sha256,
       mcpServers: Object.keys(config.mcpServers),
       toolNames: allowedToolNames,
       skillNames: skillCatalog ? skillCatalog.list().map((s) => s.name) : [],
+      ...(config.router ? { routeNames: ['default', ...Object.keys(config.router.routes)] } : {}),
     },
     close: () => mcpProvider.close(),
   };
+}
+
+/**
+ * Builds the model adapter for a run: identical code path for c1/c2/c3.
+ * When the harness config has a `router` section, wraps a plain
+ * GlmModelAdapter (the 'default' route) with a RoutingModelAdapter using
+ * the same sessionId as the run; without one, returns the plain adapter
+ * unchanged, so output without --harness-config (or without a router
+ * section) is unaffected.
+ */
+async function createModel({ apiKey, modelId, sessionId, harnessExtras, makeAdapter }) {
+  const defaultAdapter = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+  if (!harnessExtras?.router) return defaultAdapter;
+  return createRoutedModel(harnessExtras.router, defaultAdapter, { sessionId, makeAdapter });
+}
+
+/**
+ * Reduces a RoutingModelAdapter's getRouting() into run-report.json's
+ * `routing` field: per-route usage as-is, but the decision log collapsed
+ * into counts per route/reason instead of the full per-call list, which
+ * can grow unbounded over a long C2/C3 run.
+ */
+function summarizeRouting(routing) {
+  const decisionCounts = {};
+  for (const { route, reason } of routing.decisions) {
+    const key = `${route}:${reason}`;
+    decisionCounts[key] = (decisionCounts[key] ?? 0) + 1;
+  }
+  return { byRoute: routing.byRoute, decisions: decisionCounts };
 }
 
 function buildHarness(ws, model, toolRounds, auditFile, harnessExtras) {
@@ -479,11 +511,12 @@ async function main() {
 
   if (!configFailure) try {
     if (parsed.config === 'c1') {
-      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
       const { harness } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const result = await harness.run(task, { maxToolRounds: parsed.toolRounds });
       report.status = result.finalResponse.type === 'finish' ? 'SUCCESS' : 'FAILED';
       report.usage = model.getUsage();
+      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
       report.turns = result.turns.length;
       report.trace = compactTraceC1(result);
       if (result.finalResponse.type === 'finish') {
@@ -492,7 +525,7 @@ async function main() {
         report.failure = `${result.finalResponse.code}: ${result.finalResponse.message}`;
       }
     } else if (parsed.config === 'c2') {
-      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
       const { harness, execution, verification } = buildHarness(ws, model, parsed.toolRounds, path.join(ws, 'audit.jsonl'), harnessExtras);
       const loop = new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       const loopResult = await loop.run({
@@ -503,6 +536,7 @@ async function main() {
       });
       report.status = loopResult.status;
       report.usage = model.getUsage();
+      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
       report.turns = loopResult.turns;
       report.decision = loopResult.decision;
       report.failure = loopResult.failure;
@@ -511,7 +545,7 @@ async function main() {
         report.finalResponse = truncate(loopResult.finalResponse.content, 2000);
       }
     } else if (parsed.config === 'c3') {
-      const model = new GlmModelAdapter({ apiKey, model: modelId, sessionId });
+      const model = await createModel({ apiKey, modelId, sessionId, harnessExtras });
       const factory = (node) => {
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
         return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
@@ -527,6 +561,7 @@ async function main() {
       const graphResult = await engine.run();
       report.status = graphResult.status;
       report.usage = model.getUsage();
+      if (typeof model.getRouting === 'function') report.routing = summarizeRouting(model.getRouting());
       report.steps = graphResult.steps;
       report.totalLoopTurns = graphResult.totalLoopTurns;
       report.decision = graphResult.decision;
@@ -600,5 +635,7 @@ export {
   buildNodes,
   buildRouter,
   createWorkspace,
+  createModel,
+  summarizeRouting,
   main,
 };

@@ -31,7 +31,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 
 ### Tests
 
-`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against glm's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
+`node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against glm's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `GlmModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
 
 ## Configurations
 
@@ -85,6 +85,55 @@ failure: `run-report.json` is still written, with `status: "FAILED"` and
 `--harness-config` with no path value is a usage error (matching
 `--config`), not a raw stack trace.
 
+## Model router (`--harness-config` with a `router` section)
+
+The same `--harness-config` file can also carry an optional `router`
+section (see `glm/docs/model-router.md`). It is **not** set in this
+repo's own `experiment/harness-config.json` — routing stays off by
+default — but a config that opts in looks like:
+
+```json
+{
+  "skillsDirs": ["./skills"],
+  "router": {
+    "longContextThreshold": 60000,
+    "routes": {
+      "longContext": { "model": "glm-5.2-long", "apiKeyEnv": "LONG_MODEL_API_KEY" },
+      "retry": { "model": "glm-5.2" }
+    }
+  }
+}
+```
+
+When set, the runner wraps the model it builds for the run in a
+`RoutingModelAdapter` — identically for c1, c2 and c3, using the same
+`sessionId` — so requests over `longContextThreshold` go to `longContext`,
+retry turns (verification feedback present) go to `retry`, and everything
+else keeps going to the default model. Without a `router` section (or
+without `--harness-config` at all), the model is unwrapped and behavior
+is unchanged.
+
+## Metrics recorded — `routing`
+
+When a router is active, `run-report.json` gains a `routing` field:
+
+```json
+{
+  "routing": {
+    "byRoute": { "default": { "calls": 3, "promptTokens": 120, "completionTokens": 60, "totalTokens": 180, "cost": 0.01 } },
+    "decisions": { "default:default": 3, "longContext:long_context": 1 }
+  }
+}
+```
+
+`byRoute` is the per-route usage from `RoutingModelAdapter.getRouting()`.
+`decisions` is the route-decision log collapsed into counts per
+`"<route>:<reason>"` key rather than the full per-call list, which would
+otherwise grow unbounded over a long C2/C3 run; per-route/per-reason
+counts are enough to see which rule fired and how often. `harnessConfig`
+metadata also gains a `routeNames` array (`["default", ...]`) when a
+router is configured.
+
 ## Battery phase (`--with-batteries`)
 
 1. `docker compose up -d --build` in the workspace.
@@ -119,7 +168,12 @@ Every run writes `run-report.json` into the workspace:
     "sha256": "...",
     "mcpServers": ["..."],
     "toolNames": ["mcp__server__tool", "load_skill"],
-    "skillNames": ["..."]
+    "skillNames": ["..."],
+    "routeNames?": ["default", "longContext", "retry"]
+  },
+  "routing?": {
+    "byRoute": { "default": { "calls": 0, "promptTokens": 0, "completionTokens": 0, "totalTokens": 0, "cost": 0 } },
+    "decisions": { "default:default": 0 }
   },
   "closeError?": "..."
 }
@@ -131,8 +185,11 @@ Every run writes `run-report.json` into the workspace:
 - `trace` — compact per-turn/per-step summaries; no full model content.
 - `harnessConfig` — only present with `--harness-config`: the config path,
   a sha256 of its content, the configured MCP server names, every
-  registered tool name (MCP + `load_skill`), and every loaded skill name.
+  registered tool name (MCP + `load_skill`), every loaded skill name, and
+  (only when `router` is configured) `routeNames` — `["default", ...]`.
   A failure loading/connecting it is recorded as `status: "FAILED"` and
   `failure: "harness-config: ..."` instead (see above).
+- `routing` — only present when a `router` section is configured; see
+  "Model router" above.
 - `closeError` — only present if closing the MCP connection at the end of
   the run itself failed; never replaces `failure`.
