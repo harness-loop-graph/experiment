@@ -1,13 +1,14 @@
-# Medical Appointments & Clinical History — Target Application
+# Experiment — Medical Appointments & Clinical History
 
-This repository defines the **target application** of the experiment:
+This repository is the **experiment bench**, not an application. It holds
 the fixed specification the generator system receives (`SPEC.md`), the
 hidden acceptance batteries (defined before the first run, never shown
-to the generator), and the experiment runner.
+to the generator), and the experiment runner. The only thing that
+generates code is the harness (`../glm/`).
 
 Generated systems do not live here: each run builds in an isolated
-workspace owned by the harness (`../glm/`), and the batteries run
-against that workspace.
+workspace under `runs/` (gitignored), and the batteries run against
+that workspace.
 
 ## Contents
 
@@ -15,9 +16,10 @@ against that workspace.
   catalog (EP-01..EP-20), screens (SCR-01..SCR-08), deterministic seed,
   fixed stack (PostgreSQL 16 / NestJS / React / Vitest / Playwright /
   Docker Compose).
-- `acceptance/` — hidden batteries (to be added; not part of what the
-  generator ever sees).
-- `runner/` — experiment runner (to be added).
+- `acceptance/` — hidden batteries (gitignored; never part of what the
+  generator sees).
+- `runner/` — experiment runner: runs C1/C2/C3 in isolated workspaces
+  and records metrics (see `runner/README.md`).
 
 ## Why the stack is fixed
 

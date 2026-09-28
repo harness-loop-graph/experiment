@@ -13,8 +13,8 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config c1\|c2\|c3` | **required** | Experiment configuration |
-| `--runs-dir <path>` | `<app>/runs` | Run workspace root |
-| `--spec <path>` | `app/SPEC.md` | Fixed specification file |
+| `--runs-dir <path>` | `experiment/runs` | Run workspace root |
+| `--spec <path>` | `experiment/SPEC.md` | Fixed specification file |
 | `--task-file <path>` | — | Override generation task (cheap validation runs) |
 | `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes) |
 | `--max-steps <n>` | 12 | Graph step budget (C3 only) |
