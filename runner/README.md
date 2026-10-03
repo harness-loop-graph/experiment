@@ -15,7 +15,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 | `--config c1\|c2\|c3` | **required** | Experiment configuration |
 | `--runs-dir <path>` | `experiment/runs` | Run workspace root |
 | `--spec <path>` | `experiment/SPEC.md` | Fixed specification file |
-| `--task-file <path>` | — | Override generation task (cheap validation runs) |
+| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC |
 | `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes) |
 | `--max-steps <n>` | 12 | Graph step budget (C3 only) |
 | `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Tool-call budget per interaction |

@@ -374,7 +374,29 @@ function buildRouter(ws) {
   };
 }
 
-function buildNodes(parsed) {
+// With --task-file the topology, roles and verifications stay the same; only the SPEC work is swapped for the given task.
+function overrideNodeTasks(task) {
+  const t = task.trim();
+  return {
+    architect: `Write docs/architecture.md with a short plan for the task below.\n\nTask:\n${t}`,
+    data: `Do the data-layer part of the task below, if it has one; otherwise finish.\n\nTask:\n${t}`,
+    backend: `Do the backend part of the task below, if it has one; otherwise finish.\n\nTask:\n${t}`,
+    frontend: `Do the frontend part of the task below, if it has one; otherwise finish.\n\nTask:\n${t}`,
+    reviewer:
+      'Review the workspace against the task below and write review-verdict.json with EXACTLY ' +
+      '{ "acceptable": boolean, "responsible": "data"|"backend"|"frontend"|"none", "notes": string } ' +
+      `— acceptable=true only if the task is done.\n\nTask:\n${t}`,
+  };
+}
+
+function buildNodes(parsed, taskOverride = null) {
+  const nodes = buildSpecNodes(parsed);
+  if (taskOverride == null) return nodes;
+  const tasks = overrideNodeTasks(taskOverride);
+  return nodes.map((n) => ({ ...n, task: tasks[n.id] }));
+}
+
+function buildSpecNodes(parsed) {
   return [
     {
       id: 'architect',
@@ -479,7 +501,7 @@ async function main() {
       harnessConfig: parsed.harnessConfig ?? undefined,
     };
     if (parsed.config === 'c3') {
-      plan.nodes = buildNodes(parsed).map((n) => ({
+      plan.nodes = buildNodes(parsed, parsed.taskFile ? task : null).map((n) => ({
         id: n.id,
         role: n.role,
         task: n.task,
@@ -562,7 +584,7 @@ async function main() {
         const { harness, execution, verification } = buildHarness(ws, model, node.toolRoundsPerTurn ?? parsed.toolRounds, path.join(ws, `audit-${node.id}.jsonl`), harnessExtras);
         return new AgentLoop({ harness, execution, verification, workspaceRoot: ws });
       };
-      const nodes = buildNodes(parsed);
+      const nodes = buildNodes(parsed, parsed.taskFile ? task : null);
       const engine = new GraphEngine(factory, {
         task: 'Implement the complete system described in SPEC.md',
         initialNode: 'architect',

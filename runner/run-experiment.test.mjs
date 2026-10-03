@@ -8,7 +8,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../glm/dist/index.js';
-import { loadHarnessExtras, buildHarness, createModel, summarizeRouting, attachUsageAndRouting } from './run-experiment.mjs';
+import { buildNodes, loadHarnessExtras, buildHarness, createModel, summarizeRouting, attachUsageAndRouting } from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'glm', 'tests');
@@ -281,4 +281,18 @@ test('runs main() when invoked through a symlinked path', async () => {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('c3 nodes keep topology and verifications but use the --task-file task', () => {
+  const parsed = { maxTurns: 1, toolRounds: 5 };
+  const spec = buildNodes(parsed);
+  const overridden = buildNodes(parsed, 'Create notes/summary.txt\n');
+  assert.deepEqual(overridden.map((n) => n.id), spec.map((n) => n.id));
+  assert.deepEqual(overridden.map((n) => n.verification), spec.map((n) => n.verification));
+  for (const n of overridden) {
+    assert.match(n.task, /Create notes\/summary\.txt$/);
+    assert.doesNotMatch(n.task, /SPEC/);
+  }
+  assert.match(overridden.find((n) => n.id === 'reviewer').task, /review-verdict\.json/);
+  assert.deepEqual(buildNodes(parsed, null), spec);
 });
