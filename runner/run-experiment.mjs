@@ -467,6 +467,7 @@ function compactTraceC3(graphResult) {
     loopStatus: s.loopStatus,
     decision: s.decision.action,
     nextNode: s.decision.node,
+    ...(s.loopFailure !== undefined ? { loopFailure: s.loopFailure } : {}),
   }));
 }
 
@@ -483,7 +484,12 @@ async function main() {
 
   let task = DEFAULT_TASK;
   if (parsed.taskFile) {
-    task = await fs.readFile(parsed.taskFile, 'utf-8');
+    const raw = await fs.readFile(parsed.taskFile, 'utf-8');
+    if (raw.trim().length === 0) {
+      console.error(`Usage: --task-file <path> must point to a file that is not empty or whitespace-only (got: ${parsed.taskFile})`);
+      process.exit(1);
+    }
+    task = raw;
   }
 
   if (parsed.dryRun) {
@@ -586,7 +592,9 @@ async function main() {
       };
       const nodes = buildNodes(parsed, parsed.taskFile ? task : null);
       const engine = new GraphEngine(factory, {
-        task: 'Implement the complete system described in SPEC.md',
+        // The engine's graph-level task must not contradict a --task-file
+        // override even though GraphEngine itself only consults node.task.
+        task: parsed.taskFile ? task : 'Implement the complete system described in SPEC.md',
         initialNode: 'architect',
         nodes,
         edges: [],
@@ -671,5 +679,6 @@ export {
   createModel,
   summarizeRouting,
   attachUsageAndRouting,
+  compactTraceC3,
   main,
 };

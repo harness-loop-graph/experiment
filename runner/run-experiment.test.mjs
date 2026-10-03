@@ -8,7 +8,15 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { McpToolProvider, GlmModelAdapter, RoutingModelAdapter } from '../../glm/dist/index.js';
-import { buildNodes, loadHarnessExtras, buildHarness, createModel, summarizeRouting, attachUsageAndRouting } from './run-experiment.mjs';
+import {
+  buildNodes,
+  loadHarnessExtras,
+  buildHarness,
+  createModel,
+  summarizeRouting,
+  attachUsageAndRouting,
+  compactTraceC3,
+} from './run-experiment.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GLM_TESTS_DIR = path.resolve(__dirname, '..', '..', 'glm', 'tests');
@@ -281,6 +289,86 @@ test('runs main() when invoked through a symlinked path', async () => {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('c3 --dry-run --task-file passes the override into the GraphEngine node plan (not SPEC)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-taskfile-'));
+  try {
+    const taskFile = path.join(dir, 'task.txt');
+    const taskText = 'Create notes/summary.txt documenting the API';
+    await fs.writeFile(taskFile, taskText);
+
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c3', '--dry-run', '--task-file', taskFile],
+      {
+        encoding: 'utf8',
+        // --dry-run never calls the model, but loadCredentials() runs before
+        // the dry-run branch and requires these to be set.
+        env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' },
+      },
+    );
+
+    assert.equal(res.status, 0, res.stderr);
+    const plan = JSON.parse(res.stdout);
+    assert.ok(Array.isArray(plan.nodes) && plan.nodes.length > 0);
+    for (const node of plan.nodes) {
+      assert.match(node.task, /Create notes\/summary\.txt documenting the API/);
+      assert.doesNotMatch(node.task, /SPEC/);
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--task-file rejects an empty/whitespace-only file with a usage error and non-zero exit, before any model call', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-taskfile-empty-'));
+  try {
+    const taskFile = path.join(dir, 'empty.txt');
+    await fs.writeFile(taskFile, '   \n\t\n');
+
+    const res = spawnSync(
+      process.execPath,
+      [path.join(__dirname, 'run-experiment.mjs'), '--config', 'c3', '--dry-run', '--task-file', taskFile],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, MODEL_API_KEY: 'dummy-key', MODEL_ID: 'dummy-model' },
+      },
+    );
+
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /Usage: --task-file/);
+    assert.equal(res.stdout, '');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('compactTraceC3() copies loopFailure into a failed trace entry and omits it from a successful one', () => {
+  const graphResult = {
+    trace: [
+      {
+        step: 1,
+        nodeId: 'builder',
+        loopStatus: 'FAILED',
+        decision: { action: 'FAIL', reason: 'x' },
+        loopFailure: 'max_turns (1) reached without success',
+      },
+      {
+        step: 2,
+        nodeId: 'reviewer',
+        loopStatus: 'SUCCESS',
+        decision: { action: 'FINISH', reason: 'done' },
+      },
+    ],
+  };
+
+  const compact = compactTraceC3(graphResult);
+
+  assert.equal(compact[0].loopFailure, 'max_turns (1) reached without success');
+  assert.equal('loopFailure' in compact[1], false);
 });
 
 test('c3 nodes keep topology and verifications but use the --task-file task', () => {

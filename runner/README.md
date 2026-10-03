@@ -15,7 +15,7 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 | `--config c1\|c2\|c3` | **required** | Experiment configuration |
 | `--runs-dir <path>` | `experiment/runs` | Run workspace root |
 | `--spec <path>` | `experiment/SPEC.md` | Fixed specification file |
-| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC |
+| `--task-file <path>` | — | Override generation task (cheap validation runs). In c3 every node keeps its role and verification but works on this task instead of the SPEC, and the `GraphEngine`'s graph-level task is set to the override too (nodes are what the engine actually runs, but the graph-level task no longer contradicts it). An empty or whitespace-only file is rejected with a usage error and a non-zero exit, before any model call, for every `--config` |
 | `--max-turns <n>` | 8 | Loop budget (C2/C3 nodes) |
 | `--max-steps <n>` | 12 | Graph step budget (C3 only) |
 | `--tool-rounds <n>` | 80 (c1), 30 (c2/c3) | Tool-call budget per interaction |
@@ -32,6 +32,8 @@ node runner/run-experiment.mjs --config c1|c2|c3 [options]
 ### Tests
 
 `node --test runner/run-experiment.test.mjs` (Node's built-in test runner; no extra dependency). Covers the `--harness-config` wiring against glm's fixture MCP server + skill fixtures: `run-report.json`'s `harnessConfig` metadata, the guardrail allowlist extended with MCP tools + `load_skill`, the MCP provider being closed when skill loading fails, and that a run without `--harness-config` registers the same tool set as before. Also covers `createModel()` (returns a plain `GlmModelAdapter` without a router, wraps it in a `RoutingModelAdapter` with the configured routes using an injected `makeAdapter` stub — no network — when one is configured, and propagates a clear missing-env-var error) and `summarizeRouting()` (decision log → counts per route/reason). `run-experiment.mjs` only runs `main()` when executed directly (`node runner/run-experiment.mjs ...`), so importing it for tests has no side effects.
+
+`--task-file` wiring is covered by spawning the real CLI with `--dry-run` (dummy `MODEL_API_KEY`/`MODEL_ID` in the child env, since `loadCredentials()` runs before the dry-run branch): the printed plan's c3 node tasks carry the override text and never mention `SPEC`, and an empty/whitespace-only task file exits non-zero with a `Usage: --task-file ...` message on stderr and no stdout. `compactTraceC3()` is exported and tested directly for copying `loopFailure` into a failed trace entry while leaving it off a successful one.
 
 ## Configurations
 
@@ -182,7 +184,13 @@ Every run writes `run-report.json` into the workspace:
 - `turns` — interaction turns (C1/C2) or per-node loop turns aggregated (C3).
 - `steps` — graph steps (C3 only).
 - `totalLoopTurns` — total loop turns across all nodes (C3 only).
-- `trace` — compact per-turn/per-step summaries; no full model content.
+- `trace` — compact per-turn/per-step summaries; no full model content. For
+  c3, a step whose `loopStatus` is `"FAILED"` also carries `loopFailure`:
+  why that node's loop failed (its own failure summary, or the terminal
+  decision reason; with the model error code/message appended, truncated,
+  when the final response was an `error`) — so a `FAILED` step is
+  actionable instead of a bare status. A successful step has no
+  `loopFailure` field.
 - `harnessConfig` — only present with `--harness-config`: the config path,
   a sha256 of its content, the configured MCP server names, every
   registered tool name (MCP + `load_skill`), every loaded skill name, and
