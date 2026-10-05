@@ -1,3 +1,7 @@
+> **This repository is archived.** It was merged, with its full history, into
+> [`harness-loop-graph/harness`](https://github.com/harness-loop-graph/harness)
+> under `experiment/`. Use that repository from now on.
+
 # Experiment — Medical Appointments & Clinical History
 
 This repository is the **experiment bench**, not an application. It holds
